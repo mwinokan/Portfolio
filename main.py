@@ -26,7 +26,7 @@ run = 2
 substeps = 8
 dt = 0.0005
 scale = 20
-max_steps = 1000
+max_steps = 10000
 
 # drawing
 draw_indices = True
