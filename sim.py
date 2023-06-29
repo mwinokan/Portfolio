@@ -1,24 +1,8 @@
+#!/usr/bin/env python3
 
 """
 
-python3 -m http.server
-localhost:8000/test.html
-
-Make benzene a rigid body
-restart button?
-
-Do gridded collisions?
-Revisit electrostratics
-
-NaOH
-PO4
-Sulfur?
-Calcium hydroxide
-
-Cedric:
-LiCl
-KCl
-H3PO4 (phosphoric acid)
+* Stop collisions adding so much energy
 
 """
 
@@ -28,38 +12,25 @@ run = 2
 
 # sim parameters
 substeps = 8
-dt = 0.0005
+# dt = 0.0005
+dt = 0.0001
 scale = 20
 max_steps = 10000
-initial_velocity = 0.3
-avg_velocity = 0.05
-v_adjust = 0.005
+initial_velocity = 0.02
+avg_velocity = 0.02
+# avg_velocity = None
+v_adjust = 0.01
+ang_v_decay = 0.995
 
 # drawing
+draw_orientations = False
+draw_hitcircles = False
+
 draw_indices = False
-draw_electrostatics = False
 draw_acceleration = False
 draw_velocity = False
 draw_axes_lines = False
 draw_time = False
-
-# forces
-electrostatics = False
-electrostatic_cutoff = 4
-intramolecular_electrostatics = False
-electrostatic_strength = 50000
-
-# gravity
-center_gravity = False
-center_gravity_strength = 200
-
-# linear gravity
-linear_gravity = False
-linear_gravity_strength = 10000
-
-# # random
-# random_acceleration = 1
-# random_acceleration_strength = 100000
 
 t = 0.0
 
@@ -69,8 +40,12 @@ START = time.perf_counter()
 
 import random
 
-from js import document, Math, setInterval, clearInterval, setTimeout
-import pyodide
+try:
+	from js import document, Math, setInterval, clearInterval, setTimeout
+	import pyodide
+except ModuleNotFoundError:
+	print('COULD NOT LOAD WEB MODULES')
+	exit()
 
 import numpy as np
 
@@ -78,14 +53,70 @@ class Molecule:
 
 	num_molecules = 0
 
-	def __init__(self,name):
-		self.name = name
-		self.num_atoms = 0
+	def __init__(self,name,x,y,theta):
+
 		self.index = self.num_molecules
 		self.num_molecules += 1
+		
+		self.num_atoms = 0
 		self.atoms = []
-		self.angles = []
-		self.bonds = []
+
+		self.name = name
+
+		self.p = np.array([x,y],dtype=float)
+		self.p_old = np.array([x,y],dtype=float)
+		self.t = theta
+		self.t_old = theta
+
+		self._m = None
+		self._m_r = None
+		self._r = None
+		self._v = None
+		
+		self.a = np.array([0.0,0.0])
+		self.ang_v = None
+		self.ang_a = 0.0
+
+	def center_atoms(self):
+
+		# calculate the CoM
+		x_center = sum([a.x*a.m for a in self.atoms])/self.m
+		y_center = sum([a.y*a.m for a in self.atoms])/self.m
+		
+		# shift atoms by the CoM
+		for a in self.atoms:
+			a.x -= x_center
+			a.y -= y_center
+
+		# force a recalculation of the molecule radius
+		self._r = None
+		self._m_r = None
+
+	@property
+	def x(self):
+		return self.p[0]
+	
+	@property
+	def y(self):
+		return self.p[1]
+
+	@property
+	def m(self):
+		if not self._m:
+			self._m = sum(a.m for a in self.atoms)
+		return self._m
+
+	@property
+	def r(self):
+		if not self._r:
+			self._r = max(a.r+a.d for a in self.atoms)
+		return self._r
+
+	@property
+	def m_r(self):
+		if not self._m_r:
+			self._m_r = sum(a.m*a.d**2 for a in self.atoms)
+		return self._m_r
 
 	def add_atom(self,atom):
 		atom.index = self.num_atoms
@@ -93,218 +124,195 @@ class Molecule:
 		self.num_atoms += 1
 		self.atoms.append(atom)
 
-	def add_angle(self,angle):
-		self.angles.append(angle)
-
-	def add_bond(self,i,j,order=1,length=None):
-		if debug:
-			print(f'Molecule.add_bond({i},{j},{order})')
-		atom1 = self.atoms[i]
-		atom2 = self.atoms[j]
-		bond = Bond(atom1,atom2,order=order,length=length)
-		self.bonds.append(bond)
+	def draw(self):
+		if draw_hitcircles:
+			draw_circle_stroke(self.x,self.y,self.r,'aqua')
+		for atom in self.atoms:
+			x = self.x + atom.d * np.cos(atom.t+self.t)
+			y = self.y + atom.d * np.sin(atom.t+self.t)
+			draw_circle(x,y,atom.r,atom.c)
+		if draw_orientations:
+			dx = self.r * np.cos(self.t)
+			dy = self.r * np.sin(self.t)
+			draw_line(self.x,self.y,self.x+dx,self.y+dy,w=5,c='yellow')
 
 	def print(self):
 		print(f"Molecule {self.name}:")
 		print("\nAtoms:")
 		for atom in self.atoms:
-			print(atom.index,atom.symbol)
-		print("\nBonds:")
-		for bond in self.bonds:
-			print(bond.atom1.index,bond.atom2.index,bond.atom1.symbol,bond.atom2.symbol,bond.length)
-		print("\nAngles:")
-		for angle in self.angles:
-			print(angle.atom1.index,angle.atom2.index,angle.atom3.index,angle.atom1.symbol,angle.atom2.symbol,angle.atom3.symbol,angle.angle)
+			print(atom.index,atom.symbol,f'{atom.d=:.2f} {atom.t=:.2f} {atom.x=:.2f} {atom.y=:.2f}')
 
-class Bond:
-	def __init__(self,atom1,atom2,order=1,length=None): 
-		self.atom1 = atom1
-		self.atom2 = atom2
-		self.length = length or COVALENT_RADII[atom1.symbol] + COVALENT_RADII[atom2.symbol]
-		self.atom1.bonds.append(self)
-		self.atom2.bonds.append(self)
+	def get_velocity(self,recalc=True):
+		if self._v is None or recalc:
+			self._v = self.p - self.p_old
+		return self._v
 
-	def apply_constraint(self):
+	def update(self,dt,v=None,recalc=True,v_scale=1.0):
 
-		v = self.atom1.position - self.atom2.position
-		d = np.linalg.norm(v)
-		n = v/d
+		# calculate linear velocity
+		if v is None:
+			v = self.get_velocity(recalc=recalc)
+			if v_scale is not None:
+				if v_scale > 1.0:
+					v *= 1.0 + v_adjust
+				elif v_scale < 1.0:
+					v *= 1.0 - v_adjust
 
-		delta = self.length - d
+		# angular velocity
+		ang_v = self.t - self.t_old
+		ang_v *= ang_v_decay
 
-		self.atom1.position += n * delta * 0.5
-		self.atom2.position -= n * delta * 0.5
+		# save current position
+		self.p_old = self.p.copy()
+		self.t_old = float(self.t)
 
-class Angle:
-	def __init__(self,atom1,atom2,atom3,angle,strength=100,hard=True):
-		self.atom1 = atom1
-		self.atom2 = atom2
-		self.atom3 = atom3
-		self.angle = angle
-		self.strength = strength
-		if hard:
-			self.apply_constraint = self.hard_constraint
-		else:
-			self.apply_constraint = self.soft_constraint
+		# update position
+		self.p = self.p + v + self.a*dt
+		self.t = self.t + ang_v + self.ang_a*dt
 
-	def soft_constraint(self):
+		if debug:
+			print(self.index,f'p: {self.p_old} --> {self.p}, t: {self.t_old:.1f} --> {self.t:.1f}')
 
-		v1 = self.atom1.position - self.atom2.position
-		v2 = self.atom3.position - self.atom2.position
+		# zero accelerations
+		self.a = np.array([0.0,0.0])
+		self.ang_a = 0.0
 
-		d1 = np.linalg.norm(v1)
-		d2 = np.linalg.norm(v2)
+	def check_clip(self,axis,boundary):
 
-		angle = 180*np.arccos(np.dot(v1,v2)/(d1*d2))/np.pi
+		# axis should be a 2-vector of the clipping direction
 
-		delta = angle - self.angle
+		# clipping with positive x (right)
+		if axis[0] > 0:
+			for atom in self.atoms:
+				x = atom.r + self.x + atom.d * np.cos(atom.t+self.t)
+				if x > boundary:
+					delta = x - boundary
+					self.p -= np.array([2.0*delta,0.0])
 
-		if angle < self.angle:
-			n1 = v1/d1
-			n2 = v2/d2
-			self.atom1.acceleration += self.strength*np.array([-n1[1],n1[0]])*delta
-			self.atom3.acceleration += self.strength*np.array([n2[1],-n2[0]])*delta
-		elif angle > self.angle:
-			n1 = v1/d1
-			n2 = v2/d2
-			self.atom1.acceleration += self.strength*np.array([n1[1],-n1[0]])*delta
-			self.atom3.acceleration += self.strength*np.array([-n2[1],n2[0]])*delta
+					# angular
+					lever = atom.d * np.array([np.cos(atom.t+self.t),np.sin(atom.t+self.t)])
+					delta = np.array([delta,0.0])
+					torque = cw_normal(lever)
+					self.t += np.dot(delta,torque) / np.linalg.norm(torque)
+					break
 
-	def hard_constraint(self,_print=False):
+		# clipping with negative x (left)
+		elif axis[0] < 0:
+			for atom in self.atoms:
+				x = -atom.r + self.x + atom.d * np.cos(atom.t+self.t)
+				if x < boundary:
+					delta = x - boundary
+					self.p -= np.array([2.0*delta,0.0])
 
-		v1 = self.atom1.position - self.atom2.position
-		v2 = self.atom3.position - self.atom2.position
+					# angular
+					lever = atom.d * np.array([np.cos(atom.t+self.t),np.sin(atom.t+self.t)])
+					delta = np.array([delta,0.0])
+					torque = cw_normal(lever)
+					self.t += np.dot(delta,torque) / np.linalg.norm(torque)
+					break
 
-		d1 = np.linalg.norm(v1)
-		d2 = np.linalg.norm(v2)
+		# clipping with positive y (bottom)
+		if axis[1] > 0:
+			for atom in self.atoms:
+				y = atom.r + self.y + atom.d * np.sin(atom.t+self.t)
+				if y > boundary:
+					delta = y - boundary
+					self.p -= np.array([0.0,2.0*delta])
+					
+					# angular
+					lever = atom.d * np.array([np.cos(atom.t+self.t),np.sin(atom.t+self.t)])
+					delta = np.array([0.0,delta])
+					torque = cw_normal(lever)
+					self.t += np.dot(delta,torque) / np.linalg.norm(torque)
+					break
 
-		v1_angle = vec_angle(v1)
-		v2_angle = vec_angle(v2)
-
-		bisector = v1/d1 + v2/d2
-		bisector_d = np.linalg.norm(bisector)
-		if bisector_d == 0.0:
-			bisector_angle = Math.PI*(v1_angle+90)/180
-			bisector = np.array([np.cos(bisector_angle),np.sin(bisector_angle)])
-		else:
-			bisector = bisector / bisector_d
-
-		if _print:
-			print('\n')
-
-		if _print:
-			print(self.atom1.index,self.atom2.index,self.atom3.index,self.atom1.symbol,self.atom2.symbol,self.atom3.symbol)
-
-		if _print:
-			draw_circle(ctx,self.atom1.position[0]*scale,self.atom1.position[1]*scale,self.atom1.r*scale,'green')
-			draw_circle(ctx,self.atom3.position[0]*scale,self.atom3.position[1]*scale,self.atom3.r*scale,'green')
-
-		# check bisector direction
-		bisector_x_v1 = np.cross(bisector,v1)
-		# bisector_x_v2 = np.cross(bisector,v2)
-		if _print:
-			print(f'{bisector_x_v1=}')
-			# print(f'{bisector_x_v2=}')
-		if bisector_x_v1 > 0:
-			bisector = -bisector
-
-		bisector_angle = vec_angle(bisector)
-
-		if _print:
-			print(f'{bisector_angle=}')
-		if _print:
-			print(f'{self.angle=}')
-
-		if _print:
-			print(f'{bisector=}')
-			print(f'{v1_angle=}')
-			print(f'{v2_angle=}')
-
-		if bisector_x_v1 > 0:
-			new_angle1 = (bisector_angle-(180-self.angle/2))%360.0
-			new_angle2 = (bisector_angle+(180-self.angle/2))%360.0
-		else:
-			new_angle1 = (bisector_angle-self.angle/2)%360.0
-			new_angle2 = (bisector_angle+self.angle/2)%360.0
-		
-		# atom1
-		if _print:
-			print(f'{new_angle1=}')
-			print(f'{new_angle2=}')
-
-		new_angle1 = Math.PI*new_angle1/180
-		dx =  d1 * np.cos(new_angle1)
-		dy =  d1 * np.sin(new_angle1)
-		self.atom1.position = np.array([self.atom2.position[0]+dx,self.atom2.position[1]+dy])
-
-		if _print:
-			print(f'{dx=}')
-		if _print:
-			print(f'{dy=}')
-
-		# atom2
-		new_angle2 = Math.PI*new_angle2/180
-		dx =  d2 * np.cos(new_angle2)
-		dy =  d2 * np.sin(new_angle2)
-		self.atom3.position = np.array([self.atom2.position[0]+dx,self.atom2.position[1]+dy])
-
-		if _print:
-			print(f'{dx=}')
-		if _print:
-			print(f'{dy=}')
-
-		if _print:
-			draw_line(ctx,(self.atom2.position[0])*scale,(self.atom2.position[1])*scale,(self.atom2.position[0]+bisector[0])*scale,(self.atom2.position[1]+bisector[1])*scale,c='green')
+		# clipping with negative y (top)
+		elif axis[1] < 0:
+			for atom in self.atoms:
+				y = -atom.r + self.y + atom.d * np.sin(atom.t+self.t)
+				if y < boundary:
+					delta = y - boundary
+					self.p -= np.array([0.0,2.0*delta])
+					
+					# angular
+					lever = atom.d * np.array([np.cos(atom.t+self.t),np.sin(atom.t+self.t)])
+					delta = np.array([0.0,delta])
+					torque = cw_normal(lever)
+					self.t += np.dot(delta,torque) / np.linalg.norm(torque)
+					break
 
 class Atom:
-	# def __init__(self,symbol,x=0,y=0,q=0.0):
-	def __init__(self,symbol,x=0,y=0,q=0.0,v=[0,0]):
+	def __init__(self,symbol,xy=[0.0,0.0],rt=None,q=0.0):
+
+		if debug:
+			print(f'Atom.__init__({xy=},{rt=})')
+
 		self.symbol = symbol
-		self.bonds = []
-		self.colour = COLOURS[symbol]
+
+		self.c = COLOURS[symbol]
 		self.m = MASSES[symbol]
 		self.r = COVALENT_RADII[symbol]
 		self.q = q
-		if debug:
-			print('Atom.__init__',symbol)
-		self.position = np.array([x,y],dtype=float)
-		# self.old_pos = np.array([x-v[0],y-v[1]],dtype=float)
-		self.old_pos = np.array([x,y],dtype=float)
-		self.acceleration = np.array([0.0,0.0],dtype=float)
-		self._velocity = None
-		# self.acceleration = np.array([v[0],v[1]],dtype=float)
+
+		if rt is not None:
+			self._d, self.t = rt
+			self._x = self.d*np.cos(self.t)
+			self._y = self.d*np.sin(self.t)
+			self._p = np.array([self.x,self.y])
+		else:
+			self._x, self._y = xy
+			self._p = np.array([self.x,self.y])
+			self._d = np.linalg.norm(self.p)
+			self._t = vec_angle(np.array(self.p))
+
 	@property
 	def x(self):
-		return self.position[0]
-	
+		return self._x
+
 	@property
 	def y(self):
-		return self.position[1]
-	
-	def get_velocity(self,recalc=True):
-		if self._velocity is None or recalc:
-			self._velocity = self.position - self.old_pos
-		return self._velocity
+		return self._y
 
-	def update(self,dt,v=None,recalc=True,v_scale=1.0):
-		# print(len(self.position),len(self.old_pos))
-		# print(v is not None)
-		if v is None:
-			v = self.get_velocity(recalc=recalc)
-			if v_scale > 1.0:
-				v *= 1.0 + v_adjust
-			elif v_scale < 1.0:
-				v *= 1.0 - v_adjust
-		# print(np.linalg.norm(v))
-		self.old_pos = self.position.copy()
-		self.position = self.position + v + self.acceleration*dt
-		# print(self.acceleration[0])
-		if draw_acceleration:
-			draw_line(ctx,self.x*scale,self.y*scale,self.x*scale+self.acceleration[0]*scale*dt,self.y*scale+self.acceleration[1]*scale*dt,w=10,c='yellow')
-		if draw_velocity:
-			draw_line(ctx,self.x*scale,self.y*scale,self.x*scale+v[0]*scale,self.y*scale+v[1]*scale,w=10,c='aqua')
-		self.acceleration = np.array([0.0,0.0])
+	@property
+	def d(self):
+		return self._d
 
+	@property
+	def t(self):
+		return self._t
+
+	@property
+	def p(self):
+		return self._p
+
+	@x.setter
+	def x(self,a):
+		self._x = a
+		self._p = np.array([a,self.y])
+		self._d = np.linalg.norm(self.p)
+		self._t = vec_angle(np.array(self.p))
+
+	@y.setter
+	def y(self,a):
+		self._y = a
+		self._p = np.array([self.x,a])
+		self._d = np.linalg.norm(self.p)
+		self._t = vec_angle(np.array(self.p))
+
+	@d.setter
+	def d(self,a):
+		self._d = a
+		self._x = self.d*np.cos(self.t)
+		self._y = self.d*np.sin(self.t)
+		self._p = np.array([self.x,self.y])
+
+	@t.setter
+	def t(self,a):
+		self._t = a
+		self._x = self.d*np.cos(self.t)
+		self._y = self.d*np.sin(self.t)
+		self._p = np.array([self.x,self.y])
+		
 class Simulation:
 
 	def __init__(self,canvas,ctx,scale=40):
@@ -320,28 +328,18 @@ class Simulation:
 
 	def draw(self):
 		for molecule in self.molecules:
-			for atom in molecule.atoms:
-				draw_circle(self.ctx,atom.x*self.scale,atom.y*self.scale,atom.r*self.scale,atom.colour)
-				if draw_indices:
-					draw_text(f'{atom.index}',atom.x*self.scale,atom.y*self.scale)
-
-			# for bond in molecule.bonds:
-			# 	draw_line(self.ctx,bond.atom1.x*self.scale,bond.atom1.y*self.scale,bond.atom2.x*self.scale,bond.atom2.y*self.scale,w=2,c='black')
+			molecule.draw()
+			# for atom in molecule.atoms:
+			# 	draw_circle(self.ctx,atom.x*self.scale,atom.y*self.scale,atom.r*self.scale,atom.colour)
+			# 	if draw_indices:
+			# 		draw_text(f'{atom.index}',atom.x*self.scale,atom.y*self.scale)
 
 	def solve(self,dt,substeps=4,random_v=None):
 		dt = dt/substeps
 		for i in range(substeps):
-			if linear_gravity: 
-				self.apply_gravity([0,linear_gravity_strength])
-			# if random_acc:
-			# 	sim.random_acceleration(random_acceleration_strength)
-			if center_gravity:
-				self.apply_center_gravity(center_gravity_strength)
-			if electrostatics:
-				self.apply_electrostatics(electrostatic_strength)
-			self.apply_bond_constraints()
-			self.check_collisions(1.0)
-			self.apply_angle_constraints()
+			# self.apply_bond_constraints()
+			self.check_collisions(0.5)
+			# self.apply_angle_constraints()
 			self.clip()
 			current_avg_velocity = self.avg_velocity()
 			self.update_positions(dt,random_v=random_v,recalc=False,current_avg_velocity=current_avg_velocity)
@@ -352,150 +350,119 @@ class Simulation:
 		v_sum = 0.0
 		count = 0
 		for molecule in self.molecules:
-			for atom in molecule.atoms:
-				count += 1
-				v = atom.get_velocity(recalc=True)
-				try:
-					v_sum += np.linalg.norm(v)
-				except:
-					print(v,type(v))
-					raise Exception
+			count += 1
+			v = molecule.get_velocity(recalc=True)
+			try:
+				v_sum += np.linalg.norm(v)
+			except:
+				print(v,type(v))
+				raise Exception
 		return v_sum / count
 
 	def update_positions(self,dt,random_v=None,recalc=True,current_avg_velocity=None):
 		if random_v is not None:
 			v_scale = None
-		elif current_avg_velocity is not None:
+		elif current_avg_velocity is not None and avg_velocity is not None:
 			v_scale = avg_velocity / current_avg_velocity
+		else:
+			v_scale = None
 		for molecule in self.molecules:
 			if random_v is not None:
-				random_v = random_velocity(random_v)
-				if debug:
-					print(random_v)
-			for atom in molecule.atoms:
-				atom.update(dt,v=random_v,recalc=recalc,v_scale=v_scale)
+				v = random_velocity(random_v)
+			else:
+				v = None
+			# 	if debug:
+			# 		print(random_v)
+			# for atom in molecule.atoms:
+			# 	atom.update(dt,v=random_v,recalc=recalc,v_scale=v_scale)
+			molecule.update(dt,v=v,recalc=recalc,v_scale=v_scale)
+			pass
 
-	def apply_gravity(self,g):
-		g = np.array(g)
-		for molecule in self.molecules:
-			for atom in molecule.atoms:
-				atom.acceleration += g
+	def molecule_collision(self,mol1,mol2,c_r=0.75):
+		for atom1 in mol1.atoms:
+			x1 = mol1.x + atom1.d*np.cos(atom1.t + mol1.t)
+			y1 = mol1.y + atom1.d*np.sin(atom1.t + mol1.t)
+			
+			for atom2 in mol2.atoms:
+				x2 = mol2.x + atom2.d*np.cos(atom2.t + mol2.t)
+				y2 = mol2.y + atom2.d*np.sin(atom2.t + mol2.t)
 
-	def apply_center_gravity(self,g):
-		for molecule in self.molecules:
-			for atom in molecule.atoms:
-				atom.acceleration += -g*atom.position
+				v = np.array([x1-x2,y1-y2])
+				d = np.linalg.norm(v)
 
-	def apply_electrostatics(self,strength):
+				r_sum = atom1.r + atom2.r
 
-		if intramolecular_electrostatics:
-			# apply intra-molecularly
-			for mol1 in self.molecules:
-				for i,atom1 in enumerate(mol1.atoms):
-					for atom2 in mol1.atoms[i+1:]:
-						v = atom1.position-atom2.position
-						d = np.linalg.norm(v)
-						if d > 0:
-							F = -strength*atom1.q*atom2.q / d**2
-							if F > 0:
-								continue
+				if d == 0:
+					mol1.p += np.array([0.1,0])
+					mol2.p -= np.array([0.1,0])
+					v = np.array([0.2,0])
+					d = 0.2
 
-							atom1.acceleration
-							n = F * v / d
+				if d < r_sum:
 
-							atom1.acceleration -= n / atom1.m
-							atom2.acceleration += n / atom2.m
+					# linear
 
-							# if mol1.index == 0:
-							# 	print(atom1.symbol,atom2.symbol,atom1.q,atom2.q,F)
+					n = v / d
 
-		# apply inter-molecularly
-		for m,mol1 in enumerate(self.molecules):
-			for mol2 in self.molecules[m+1:]:
-				for atom1 in mol1.atoms:
-					for atom2 in mol2.atoms:
-						v = atom1.position-atom2.position
-						d = np.linalg.norm(v)
-						if d > 0 and d < electrostatic_cutoff:
-							F = -strength*atom1.q*atom2.q / d**2
-							atom1.acceleration
-							n = F * v / d
+					m_sum = mol1.m + mol2.m
 
-							atom1.acceleration -= n / atom1.m
-							atom2.acceleration += n / atom2.m
+					m_ratio_1 = mol1.m / m_sum
+					m_ratio_2 = mol2.m / m_sum
 
-							# print(f'q_prod={atom1.q*atom2.q},{d=},{F=}')
+					delta = r_sum - d
+					
+					mol1.p += n * m_ratio_2 * delta * 0.5 * c_r
+					mol2.p -= n * m_ratio_1 * delta * 0.5 * c_r
 
-							if draw_electrostatics:
-								if F > 0:
-									# repulsive
-									draw_line(ctx,atom1.x*scale,atom1.y*scale,atom2.x*scale,atom2.y*scale,w=F/10,c='red')
-								else:
-									draw_line(ctx,atom1.x*scale,atom1.y*scale,atom2.x*scale,atom2.y*scale,w=F/10,c='green')
+					# angular
+					d_vec = 0.5 * delta * n
 
-							# print(atom1.symbol,atom2.symbol,atom1.q,atom2.q,F)
+					if atom1.d > 0:
+						lever_1 = atom1.d * np.array([np.cos(atom1.t + mol1.t),np.sin(atom1.t + mol1.t)])
+						torque_1 = cw_normal(lever_1)
+						mol1.t += np.dot(d_vec,torque_1) / (np.linalg.norm(torque_1)*mol1.m_r)
+
+					if atom2.d > 0:
+						lever_2 = atom2.d * np.array([np.cos(atom2.t + mol2.t),np.sin(atom2.t + mol2.t)])
+						torque_2 = cw_normal(lever_2)
+						mol2.t += np.dot(-d_vec,torque_2) / (np.linalg.norm(torque_2)**mol2.m_r)
+					
+					return
 
 	def check_collisions(self,c_r=0.75):
-		# apply intra-molecularly
-		for mol1 in self.molecules:
-			for i,atom1 in enumerate(mol1.atoms):
-				for atom2 in mol1.atoms[i+1:]:
 
-					v = atom1.position - atom2.position
-					d = np.linalg.norm(v)
-
-					r_sum = atom1.r + atom2.r
-
-					if d == 0:
-						atom1.position += np.array([0.1,0])
-						atom2.position -= np.array([0.1,0])
-						v = np.array([0.2,0])
-						d = 0.2
-
-					if d < r_sum:
-
-						n = v / d
-
-						m_sum = atom1.m + atom2.m
-
-						m_ratio_1 = atom1.m / m_sum
-						m_ratio_2 = atom2.m / m_sum
-
-						delta = r_sum - d
-
-						atom1.position += n * m_ratio_2 * delta * 0.5 * c_r
-						atom2.position -= n * m_ratio_1 * delta * 0.5 * c_r
-
-		# only apply inter-molecularly
 		for m,mol1 in enumerate(self.molecules):
 			for mol2 in self.molecules[m+1:]:
-				for atom1 in mol1.atoms:
-					for atom2 in mol2.atoms:
 
-						v = atom1.position - atom2.position
-						d = np.linalg.norm(v)
+				v = mol1.p - mol2.p
+				d = np.linalg.norm(v)
 
-						r_sum = atom1.r + atom2.r
+				r_sum = mol1.r + mol2.r
 
-						if d == 0:
-							atom1.position += np.array([0.1,0])
-							atom2.position -= np.array([0.1,0])
-							v = np.array([0.2,0])
-							d = 0.2
+				if d == 0:
+					mol1.p += np.array([0.1,0])
+					mol2.p -= np.array([0.1,0])
+					v = np.array([0.2,0])
+					d = 0.2
 
-						if d < r_sum:
+				if d < r_sum:
 
-							n = v / d
+					# # apply using the atom radii
+					self.molecule_collision(mol1,mol2,c_r=c_r)
 
-							m_sum = atom1.m + atom2.m
+					# # apply using the molecular raii
+					
+					# n = v / d
 
-							m_ratio_1 = atom1.m / m_sum
-							m_ratio_2 = atom2.m / m_sum
+					# m_sum = mol1.m + mol2.m
 
-							delta = r_sum - d
+					# m_ratio_1 = mol1.m / m_sum
+					# m_ratio_2 = mol2.m / m_sum
 
-							atom1.position += n * m_ratio_2 * delta * 0.5 * c_r
-							atom2.position -= n * m_ratio_1 * delta * 0.5 * c_r
+					# delta = r_sum - d
+
+					# mol1.p += n * m_ratio_2 * delta * 0.5 * c_r
+					# mol2.p -= n * m_ratio_1 * delta * 0.5 * c_r
 
 	def apply_bond_constraints(self):
 		for molecule in self.molecules:
@@ -510,50 +477,72 @@ class Simulation:
 				pass
 
 	def clip(self):
-		for molecule in self.molecules:
-			for atom in molecule.atoms:
-				# print(atom.x,atom.y,w,h)
-				w = self.width/self.scale/2
-				h = self.height/self.scale/2
-				if atom.x + atom.r > w:
-					atom.position = np.array([w-atom.r,atom.y])
-				elif atom.x - atom.r < -w:
-					atom.position = np.array([-w+atom.r,atom.y])
+		for mol in self.molecules:
+			
+			w = self.width/self.scale/2
+			h = self.height/self.scale/2
 
-				if atom.y + atom.r > h:
-					atom.position = np.array([atom.x,h-atom.r])
-				elif atom.y - atom.r < -h:
-					atom.position = np.array([atom.x,-h+atom.r])
+			if mol.x + mol.r > w:
+				mol.check_clip(axis=[1,0],boundary=w)
+			elif mol.x - mol.r < -w:
+				mol.check_clip(axis=[-1,0],boundary=-w)
 
-def vec_angle(v):
-	v = v / np.linalg.norm(v)
+			if mol.y + mol.r > h:
+				mol.check_clip(axis=[0,1],boundary=h)
+			elif mol.y - mol.r < -h:
+				mol.check_clip(axis=[0,-1],boundary=-h)
+
+PI = np.arccos(-1)
+TwoPI = 2.0*Math.PI
+UP = 1.5*PI
+
+def vec_angle(v,d=None):
+	d = d or np.linalg.norm(v)
+
+	if d == 0:
+		return UP
+
+	v = v / d
 
 	if v[0] == 0:
 		if v[1] > 0:
-			v_angle = 90
+			v_angle = PI/2
 		else:
-			v_angle = -90
+			v_angle = -PI/2
 	else:
-		v_angle = 180*np.arctan(v[1]/v[0])/Math.PI
-		v_angle = 180*np.arccos(v[0])/Math.PI
+		v_angle = np.arccos(v[0])
 		if v[1] < 0:
-			v_angle = 360 - v_angle
+			v_angle = TwoPI - v_angle
 
-	# if v_angle > 359.5:
-	# 	v_angle += 0.5
-
-	return v_angle%360.0
+	return v_angle%(TwoPI)
 
 def set_running():
 	document.getElementById("py-status").innerHTML = ''
 
-def draw_circle(ctx,x,y,r,c):
+def draw_circle(x,y,r,c):
+	x *= scale
+	y *= scale
+	r *= scale
 	ctx.beginPath()
-	ctx.arc(x,y,r,0,2*Math.PI)
+	ctx.arc(x,y,r,0,TwoPI)
 	ctx.fillStyle = c
 	ctx.fill()
 
-def draw_line(ctx,x1,y1,x2,y2,w=2,c='white'):
+def draw_circle_stroke(x,y,r,c,w=1):
+	x *= scale
+	y *= scale
+	r *= scale
+	ctx.beginPath()
+	ctx.lineWidth = w
+	ctx.arc(x,y,r,0,TwoPI)
+	ctx.strokeStyle = c
+	ctx.stroke()
+
+def draw_line(x1,y1,x2,y2,w=2,c='white'):
+	x1 *= scale
+	y1 *= scale
+	x2 *= scale
+	y2 *= scale
 	ctx.beginPath()
 	ctx.moveTo(x1,y1)
 	ctx.lineTo(x2,y2)
@@ -592,49 +581,37 @@ def main():
 	sim.width = canvas.width
 	sim.height = canvas.height
 
-	# make_water_grid(sim,7,5,4)
+	# sim.add_molecule(make_H2O(0,0))
+	# sim.add_molecule(make_H2O(5,0,0))
+
+	# make_water_grid(sim,7,4)
+	
+	# makers = [
+		# make_H2,
+		# make_H2O,
+		# make_O2,
+		# make_NaCl,
+		# make_ClI,
+		# make_CO2,
+		# make_CO,
+		# # make_NH2,
+		# make_NH3,
+		# make_CH4,
+		# make_O3,
+		# make_C2H4,
+		# make_benzene,
+	# ]
 
 	makers = [
-		make_H2,
-		make_O2,
-		make_CO,
-		make_NaCl,
-		# make_ClI,
 		make_H2O,
-		make_CO2,
-		make_NH3,
-		make_O3,
-		make_CH4,
-	]
+		make_H2O,
+		make_C2H4,
+		make_H2O,
+		make_H2O,
+		make_benzene,
+	] * 2
 
-	make_molecule_grid(sim,makers,c=5,d=5)
-
-	# # sim.add_molecule(make_H2O(x=-3,y=3))
-	# # sim.add_molecule(make_H2O(x=3,y=-3))
-	# sim.add_molecule(make_H2O(x=-3,y=-3))
-	# # # sim.add_molecule(make_H2O(x=3,y=3))
-	
-	# sim.add_molecule(make_NH3(x=3,y=3))
-	
-	# sim.add_molecule(make_CO2(x=5,y=5))
-	
-	# sim.add_molecule(make_O3(x=-5,y=5))
-	
-	# sim.add_molecule(make_NH2(x=5,y=-5))
-	
-	# sim.add_molecule(make_CH4(x=8,y=-5))
-	
-	# # wobbly
-	# sim.add_molecule(make_C2H4(x=-5,y=-5))
-
-	# sim.molecules[0].angles[0].apply_constraint(_print=True)
-	
-	# sim.add_molecule(make_benzene(x=0,y=0))
-	
-	# # benzene angle debug:
-	# j = 12
-	# for i in range(j):
-	# 	sim.molecules[0].angles[i].apply_constraint(_print=i==j-1)
+	make_molecule_grid(sim,makers,5,3,6)
 	
 	sim.draw()
 	
@@ -644,11 +621,11 @@ def main():
 		sim.solve(dt=dt,substeps=substeps,random_v=initial_velocity)
 		sim.draw()
 
-
 	draw_loop_proxy = pyodide.ffi.create_proxy(draw_loop)
 
 	if run > 1:
-		interval_id = setInterval(draw_loop_proxy,50)
+		# interval_id = setInterval(draw_loop_proxy,50)
+		interval_id = setInterval(draw_loop_proxy,20)
 
 	if debug:
 		print('finished.')
@@ -674,223 +651,121 @@ def make_water_grid(sim,c,r,d=4):
 		y = d*(i//c) - d*r//2
 		sim.add_molecule(make_H2O(x,y))
 
-def make_H2(x,y):
-	if debug:
-		print('making hydrogen')
-	h2 = Molecule('hydrogen')
-	h2.add_atom(Atom('H',x-0.5,y,q=0.0))
-	h2.add_atom(Atom('H',x+0.5,y,q=0.0))
-	h2.add_bond(0,1)
-	return h2
+def make_H2(x,y,t=0):
+	mol = Molecule('hydrogen',x,y,t)
+	mol.add_atom(Atom('H',rt=[COVALENT_RADII['H'],PI/2],q=0.0))
+	mol.add_atom(Atom('H',rt=[COVALENT_RADII['H'],-PI/2],q=0.0))
+	mol.center_atoms()
+	return mol
 
-def make_O2(x,y):
-	if debug:
-		print('making oxygen')
-	o2 = Molecule('oxygen')
-	o2.add_atom(Atom('O',x-0.5,y,q=0.0))
-	o2.add_atom(Atom('O',x+0.5,y,q=0.0))
-	o2.add_bond(0,1)
-	return o2
+def make_H2O(x,y,t=0):
+	mol = Molecule('water',x,y,t)
+	mol.add_atom(Atom('O',q=-0.834))
+	mol.add_atom(Atom('H',rt=[COVALENT_RADII['O']+COVALENT_RADII['H'],BOND_ANGLES['H O H']/2],q=0.417))
+	mol.add_atom(Atom('H',rt=[COVALENT_RADII['O']+COVALENT_RADII['H'],-BOND_ANGLES['H O H']/2],q=0.417))
+	mol.center_atoms()
+	return mol
 
-def make_NaCl(x,y):
-	if debug:
-		print('making salt')
-	if electrostatics:
-		print('salt: inaccurate charges!!')
-	NaCl = Molecule('salt')
-	NaCl.add_atom(Atom('Na',x,y,q=0.0))
-	NaCl.add_atom(Atom('Cl',x+1,y,q=0.0))
-	NaCl.add_bond(0,1)
-	return NaCl
+def make_O2(x,y,t=0):
+	mol = Molecule('oxygen',x,y,t)
+	mol.add_atom(Atom('O',rt=[COVALENT_RADII['O'],PI/2],q=0.0))
+	mol.add_atom(Atom('O',rt=[COVALENT_RADII['O'],-PI/2],q=0.0))
+	mol.center_atoms()
+	return mol
 
-def make_ClI(x,y):
-	if debug:
-		print('making iodine monochloride')
-	if electrostatics:
-		print('iodine monochloride: inaccurate charges!!')
-	ClI = Molecule('salt')
-	ClI.add_atom(Atom('Cl',x-1,y,q=0.0))
-	ClI.add_atom(Atom('I',x+1,y,q=0.0))
-	ClI.add_bond(0,1)
-	return ClI
+def make_NaCl(x,y,t=0):
+	mol = Molecule('salt',x,y,t)
+	mol.add_atom(Atom('Na',rt=[COVALENT_RADII['Na'],PI/2],q=None))
+	mol.add_atom(Atom('Cl',rt=[COVALENT_RADII['Cl'],-PI/2],q=None))
+	mol.center_atoms()
+	return mol
 
-def make_H2O(x,y):
-	if debug:
-		print('making water')
-	h2o = Molecule('water')
-	h2o.add_atom(Atom('O',x,y,q=-0.834))
-	h2o.add_atom(Atom('H',x+1,y,q=0.417))
-	h2o.add_atom(Atom('H',x-1,y,q=0.417))
-	h2o.add_bond(0,1)
-	h2o.add_bond(0,2)
-	h2o.add_angle(Angle(h2o.atoms[1],h2o.atoms[0],h2o.atoms[2],BOND_ANGLES['H O H']))
-	return h2o
-	# def make_H2O(x,y):
+def make_ClI(x,y,t=0):
+	mol = Molecule('iodine monochloride',x,y,t)
+	mol.add_atom(Atom('Cl',rt=[COVALENT_RADII['Cl'],PI/2],q=None))
+	mol.add_atom(Atom('I',rt=[COVALENT_RADII['I'],-PI/2],q=None))
+	mol.center_atoms()
+	return mol
 
-def make_CO2(x,y):
-	if debug:
-		print('making carbon dioxide')
-	co2 = Molecule('carbon dioxide')
-	co2.add_atom(Atom('C',x,y,q=0.6))
-	co2.add_atom(Atom('O',x+1,y,q=-0.3))
-	co2.add_atom(Atom('O',x-1,y,q=-0.3))
-	co2.add_bond(0,1)
-	co2.add_bond(0,2)
-	co2.add_angle(Angle(co2.atoms[1],co2.atoms[0],co2.atoms[2],BOND_ANGLES['O C O']))
-	return co2
+def make_CO2(x,y,t=0):
+	mol = Molecule('carbon dioxide',x,y,t)
+	mol.add_atom(Atom('C',q=0.6))
+	mol.add_atom(Atom('O',rt=[COVALENT_RADII['C']+COVALENT_RADII['O'],BOND_ANGLES['O C O']/2],q=-0.3))
+	mol.add_atom(Atom('O',rt=[COVALENT_RADII['C']+COVALENT_RADII['O'],-BOND_ANGLES['O C O']/2],q=-0.3))
+	mol.center_atoms()
+	return mol
 
-def make_CO(x,y):
-	if debug:
-		print('making carbon monoxide')
-	co = Molecule('carbon monoxide')
-	co.add_atom(Atom('C',x,y,q=0.6))
-	co.add_atom(Atom('O',x+1,y,q=-0.3))
-	co.add_bond(0,1)
-	return co
+def make_CO(x,y,t=0):
+	mol = Molecule('carbon monoxide',x,y,t)
+	mol.add_atom(Atom('C',q=0.6))
+	mol.add_atom(Atom('O',rt=[bond_length('CO'),PI/2],q=-0.3))
+	mol.center_atoms()
+	return mol
 
 # no charges!
-def make_NH2(x,y):
-	if debug:
-		print('making amidogen')
-	if electrostatics:
-		print('amidogen: inaccurate charges!!')
-	nh2 = Molecule('amidogen')
-	nh2.add_atom(Atom('N',x,y,q=0.6))
-	nh2.add_atom(Atom('H',x+1,y,q=-0.3))
-	nh2.add_atom(Atom('H',x-1,y,q=-0.3))
-	nh2.add_bond(0,1)
-	nh2.add_bond(0,2)
-	nh2.add_angle(Angle(nh2.atoms[1],nh2.atoms[0],nh2.atoms[2],BOND_ANGLES['H N H']))
-	return nh2
+def make_NH2(x,y,t=0):
+	mol = Molecule('amidogen',x,y,t)
+	mol.add_atom(Atom('N',q=None))
+	mol.add_atom(Atom('H',rt=[bond_length('OH'),BOND_ANGLES['H N H']/2],q=None))
+	mol.add_atom(Atom('H',rt=[bond_length('OH'),-BOND_ANGLES['H N H']/2],q=None))
+	mol.center_atoms()
+	return mol
 
 # no charges!
-def make_NH3(x,y):
-	if debug:
-		print('making ammonia')
-	if electrostatics:
-		print('ammonia: inaccurate charges!!')
-	nh3 = Molecule('ammonia')
-	nh3.add_atom(Atom('N',x,y,q=0.6))
-	nh3.add_atom(Atom('H',x+1,y-0.5,q=-0.3))
-	nh3.add_atom(Atom('H',x-1,y,q=-0.3))
-	nh3.add_atom(Atom('H',x,y+1,q=-0.3))
-	nh3.add_bond(0,1)
-	nh3.add_bond(0,2)
-	nh3.add_bond(0,3)
-	nh3.add_angle(Angle(nh3.atoms[1],nh3.atoms[0],nh3.atoms[2],120))
-	nh3.add_angle(Angle(nh3.atoms[3],nh3.atoms[0],nh3.atoms[1],120))
-	return nh3
+def make_NH3(x,y,t=0):
+	mol = Molecule('ammonia',x,y,t)
+	mol.add_atom(Atom('N',q=None))
+	mol.add_atom(Atom('H',rt=[bond_length('NH'),0],q=None))
+	mol.add_atom(Atom('H',rt=[bond_length('NH'),TwoPI/3],q=None))
+	mol.add_atom(Atom('H',rt=[bond_length('NH'),2*TwoPI/3],q=None))
+	mol.center_atoms()
+	return mol
 
 # no charges!
-def make_CH4(x,y):
-	if debug:
-		print('making methane')
-	if electrostatics:
-		print('methane: inaccurate charges!!')
-	ch4 = Molecule('methane')
-	ch4.add_atom(Atom('C',x,y,q=0.6))
-	ch4.add_atom(Atom('H',x+1,y-1,q=-0.3))
-	ch4.add_atom(Atom('H',x-1,y-1,q=-0.3))
-	ch4.add_atom(Atom('H',x-1,y+1,q=-0.3))
-	ch4.add_atom(Atom('H',x+1,y+1,q=-0.3))
-	ch4.add_bond(0,1)
-	ch4.add_bond(0,2)
-	ch4.add_bond(0,3)
-	ch4.add_bond(0,4)
-	ch4.add_angle(Angle(ch4.atoms[1],ch4.atoms[0],ch4.atoms[2],90))
-	ch4.add_angle(Angle(ch4.atoms[2],ch4.atoms[0],ch4.atoms[3],90))
-	ch4.add_angle(Angle(ch4.atoms[3],ch4.atoms[0],ch4.atoms[4],90))
-	# ch4.add_angle(Angle(ch4.atoms[3],ch4.atoms[0],ch4.atoms[1],120))
-	return ch4
+def make_CH4(x,y,t=0):
+	mol = Molecule('methane',x,y,t)
+	mol.add_atom(Atom('C',q=None))
+	mol.add_atom(Atom('H',rt=[bond_length('HC'),0],q=None))
+	mol.add_atom(Atom('H',rt=[bond_length('HC'),PI/2],q=None))
+	mol.add_atom(Atom('H',rt=[bond_length('HC'),PI],q=None))
+	mol.add_atom(Atom('H',rt=[bond_length('HC'),UP],q=None))
+	mol.center_atoms()
+	return mol
 
 # no charges!
-def make_O3(x,y):
-	if debug:
-		print('making ozone')
-	if electrostatics:
-		print('ozone: inaccurate charges!!')
-	ozone = Molecule('ozone')
-	ozone.add_atom(Atom('O',x,y,q=0.6))
-	ozone.add_atom(Atom('O',x+1,y,q=-0.3))
-	ozone.add_atom(Atom('O',x-1,y,q=-0.3))
-	ozone.add_bond(0,1)
-	ozone.add_bond(0,2)
-	ozone.add_angle(Angle(ozone.atoms[1],ozone.atoms[0],ozone.atoms[2],120))
-	return ozone
+def make_O3(x,y,t=0):
+	mol = Molecule('ozone',x,y,t)
+	mol.add_atom(Atom('O',q=None))
+	mol.add_atom(Atom('O',rt=[bond_length('OO'),PI/3],q=None))
+	mol.add_atom(Atom('O',rt=[bond_length('OO'),-PI/3],q=None))
+	mol.center_atoms()
+	return mol
 
 # wobbly
-def make_C2H4(x,y):
-	if debug:
-		print('making ethylene')
-	ethe = Molecule('ethylene')
-	ethe.add_atom(Atom('C',-0.5+x,y,q=-0.42))
-	ethe.add_atom(Atom('C',-0.5+x+1,y,q=-0.42))
-	ethe.add_atom(Atom('H',-0.5+x-0.5,y+0.5,q=0.21))
-	ethe.add_atom(Atom('H',-0.5+x-0.5,y-0.5,q=0.21))
-	ethe.add_atom(Atom('H',-0.5+x+1.5,y+0.5,q=0.21))
-	ethe.add_atom(Atom('H',-0.5+x+1.5,y-0.5,q=0.21))
-	ethe.add_bond(0,1)
-	ethe.add_bond(0,2)
-	ethe.add_bond(0,3)
-	ethe.add_bond(1,4)
-	ethe.add_bond(1,5)
+def make_C2H4(x,y,t=0):
+	mol = Molecule('ethylene',x,y,t)
+	mol.add_atom(Atom('C',rt=[COVALENT_RADII['C'],PI/2],q=-0.42))
+	mol.add_atom(Atom('C',rt=[COVALENT_RADII['C'],-PI/2],q=-0.42))
 
-	ethe.add_bond(2,4,length=3)
+	mol.add_atom(Atom('H',xy=[mol.atoms[0].x+bond_length('CH')*np.sin(BOND_ANGLES['C C H']/2),mol.atoms[0].y+bond_length('CH')*np.cos(BOND_ANGLES['C C H']/2)],q=0.21))
+	mol.add_atom(Atom('H',xy=[mol.atoms[0].x+bond_length('CH')*np.sin(-BOND_ANGLES['C C H']/2),mol.atoms[0].y+bond_length('CH')*np.cos(-BOND_ANGLES['C C H']/2)],q=0.21))
 
-	# ethe.print()
-	
-	# all of these make it unstable!
-	# ethe.add_angle(Angle(ethe.atoms[0],ethe.atoms[1],ethe.atoms[4],BOND_ANGLES['C C H']))
-	# ethe.add_angle(Angle(ethe.atoms[5],ethe.atoms[1],ethe.atoms[4],BOND_ANGLES['C C H']))
-	# ethe.add_angle(Angle(ethe.atoms[1],ethe.atoms[0],ethe.atoms[2],BOND_ANGLES['C C H']))
-	# ethe.add_angle(Angle(ethe.atoms[3],ethe.atoms[0],ethe.atoms[1],BOND_ANGLES['C C H']))
-	
-	ethe.add_angle(Angle(ethe.atoms[2],ethe.atoms[0],ethe.atoms[3],BOND_ANGLES['H C H']))
-	ethe.add_angle(Angle(ethe.atoms[4],ethe.atoms[1],ethe.atoms[5],BOND_ANGLES['H C H']))
-	return ethe
+	mol.add_atom(Atom('H',xy=[mol.atoms[1].x-bond_length('CH')*np.sin(BOND_ANGLES['C C H']/2),mol.atoms[1].y-bond_length('CH')*np.cos(BOND_ANGLES['C C H']/2)],q=0.21))
+	mol.add_atom(Atom('H',xy=[mol.atoms[1].x-bond_length('CH')*np.sin(-BOND_ANGLES['C C H']/2),mol.atoms[1].y-bond_length('CH')*np.cos(-BOND_ANGLES['C C H']/2)],q=0.21))
+	mol.center_atoms()
+	return mol
 
 # very unstable
-def make_benzene(x,y):
-	if debug:
-		print('making benzene')
+def make_benzene(x,y,t=0):
 
-	r = 1.5
-	
-	benz = Molecule('benzene')
-	for i in range(6):
-
-		x = r*np.cos(2*Math.PI*i/6)
-		y = r*np.sin(2*Math.PI*i/6)
-		benz.add_atom(Atom('C',x,y,q=-0.115))
-
-		x = (r+1)*np.cos(2*Math.PI*i/6)
-		y = (r+1)*np.sin(2*Math.PI*i/6)
-		benz.add_atom(Atom('H',x,y,q=0.115))
-
-		benz.add_bond(2*i,2*i+1)
+	mol = Molecule('benzene',x,y,t)
+	r = COVALENT_RADII['C']/np.sin(PI/6)
 
 	for i in range(6):
-		benz.add_bond(2*i-2,2*i)
+		mol.add_atom(Atom('C',rt=[r,i*PI/3],q=None))
+		mol.add_atom(Atom('H',rt=[r+bond_length('CH'),i*PI/3],q=None))
 
-	for i in range(6):
-		# print(2*i-2,2*i,(2*i+2)%12)
-
-		# if i%2 == 0:
-		# C C C
-		benz.add_angle(Angle(benz.atoms[2*i-2],benz.atoms[2*i],benz.atoms[(2*i+2)%12],120,500))
-
-		# break
-		
-	# for i in range(5):
-	# 	# H C C
-	# 	benz.add_angle(Angle(benz.atoms[2*i+1],benz.atoms[2*i],benz.atoms[(2*i+2)%12],120,100))
-		
-		# # C C H
-		# benz.add_angle(Angle(benz.atoms[2*i-2],benz.atoms[2*i],benz.atoms[(2*i+1)%12],103.3,100))
-	
-	# benz.print()
-
-	return benz
+	return mol
 
 def clear_screen():
 	ctx.clearRect(-canvas.width/2, -canvas.height/2, canvas.width, canvas.height)
@@ -919,9 +794,15 @@ def draw_loop():
 	if counter == max_steps:
 		clearInterval(interval_id)
 
+def cw_normal(vec):
+	return np.array([vec[1],-vec[0]])
+
 def random_velocity(strength):
-	theta = random.uniform(0,2*Math.PI)
+	theta = random.uniform(0,TwoPI)
 	return strength*np.array([np.cos(theta),np.sin(theta)])
+
+def bond_length(symbols):
+	return COVALENT_RADII[symbols[0]]+COVALENT_RADII[symbols[1]]
 
 COVALENT_RADII = {
 'X': 0.2, 'H': 0.31, 'He': 0.28, 'Li': 1.28, 'Be': 0.96, 'B': 0.84, 'C': 0.76, 'N': 0.71, 'O': 0.66, 'F': 0.57, 'Ne': 0.58, 'Na': 1.66, 'Mg': 1.41, 'Al': 1.21, 'Si': 1.11, 'P': 1.07, 'S': 1.05, 'Cl': 1.02, 'Ar': 1.06, 'K': 2.03, 'Ca': 1.76, 'Sc': 1.7, 'Ti': 1.6, 'V': 1.53, 'Cr': 1.39, 'Mn': 1.39, 'Fe': 1.32, 'Co': 1.26, 'Ni': 1.24, 'Cu': 1.32, 'Zn': 1.22, 'Ga': 1.22, 'Ge': 1.2, 'As': 1.19, 'Se': 1.2, 'Br': 1.2, 'Kr': 1.16, 'Rb': 2.2, 'Sr': 1.95, 'Y': 1.9, 'Zr': 1.75, 'Nb': 1.64, 'Mo': 1.54, 'Tc': 1.47, 'Ru': 1.46, 'Rh': 1.42, 'Pd': 1.39, 'Ag': 1.45, 'Cd': 1.44, 'In': 1.42, 'Sn': 1.39, 'Sb': 1.39, 'Te': 1.38, 'I': 1.39, 'Xe': 1.4, 'Cs': 2.44, 'Ba': 2.15, 'La': 2.07, 'Ce': 2.04, 'Pr': 2.03, 'Nd': 2.01, 'Pm': 1.99, 'Sm': 1.98, 'Eu': 1.98, 'Gd': 1.96, 'Tb': 1.94, 'Dy': 1.92, 'Ho': 1.92, 'Er': 1.89, 'Tm': 1.9, 'Yb': 1.87, 'Lu': 1.87, 'Hf': 1.75, 'Ta': 1.7, 'W': 1.62, 'Re': 1.51, 'Os': 1.44, 'Ir': 1.41, 'Pt': 1.36, 'Au': 1.36, 'Hg': 1.32, 'Tl': 1.45, 'Pb': 1.46, 'Bi': 1.48, 'Po': 1.4, 'At': 1.5, 'Rn': 1.5, 'Fr': 2.6, 'Ra': 2.21, 'Ac': 2.15, 'Th': 2.06, 'Pa': 2.0, 'U': 1.96, 'Np': 1.9, 'Pu': 1.87, 'Am': 1.8, 'Cm': 1.69, 'Bk': 0.2, 'Cf': 0.2, 'Es': 0.2, 'Fm': 0.2, 'Md': 0.2, 'No': 0.2, 'Lr': 0.2, 'Rf': 0.2, 'Db': 0.2, 'Sg': 0.2, 'Bh': 0.2, 'Hs': 0.2, 'Mt': 0.2, 'Ds': 0.2, 'Rg': 0.2, 'Cn': 0.2, 'Nh': 0.2, 'Fl': 0.2, 'Mc': 0.2, 'Lv': 0.2, 'Ts': 0.2, 'Og': 0.2
@@ -934,6 +815,9 @@ MASSES = {
 BOND_ANGLES = {
 'H N C': 111.0, 'N C C': 110.0, 'C C O': 110.5, 'C C C': 108.0, 'N C H': 109.5, 'C N C': 112.0, 'H C C': 109.5, 'C O C': 109.6, 'C S C': 95.0, 'H N H': 120.0, 'H O C': 108.0, 'H C H': 109.0, 'H S C': 95.0, 'N C N': 120.0, 'O C C': 118.0, 'O C H': 121.7, 'O C N': 122.5, 'O C O': 124.0, 'S C C': 112.5, 'S C H': 111.3, 'S S C': 103.3, 'C C H': 110.1, 'C C N': 122.0, 'H O H': 104.5, 'C C S': 124.0, 'N C S': 116.4, 'N C O': 124.0, 'S C S': 124.0, 'O C S': 125.0, 'C C Cl': 120.0, 'C C Br': 120.0, 'C C I': 120.0, 'N C Br': 120.0, 'C C F': 118.8, 'Cl C Cl': 109.0, 'Br C Br': 110.5, 'F C F': 107.0, 'Cl C H': 108.5, 'Br C H': 107.0, 'C C P': 117.0, 'P C F': 122.0, 'F C H': 108.9, 'P C H': 110.0, 'C N N': 115.0, 'C N H': 113.0, 'C N O': 116.0, 'O N O': 128.0, 'C N S': 111.0, 'N N N': 102.2, 'N N O': 103.0, 'N N H': 119.5, 'C N P': 118.3, 'P N H': 123.6, 'S N H': 113.1, 'C O N': 108.5, 'C O P': 120.0, 'C O S': 108.0, 'P O P': 143.0, 'C O H': 115.0, 'N O H': 101.5, 'P O H': 115.0, 'O P O': 111.6, 'O P S': 131.0, 'S P S': 128.5, 'C P O': 94.0, 'N P O': 110.6, 'C S N': 103.0, 'C S S': 103.3, 'C S H': 95.0, 'C S O': 98.0, 'N S O': 94.2, 'O S O': 109.5, 'N S N': 102.3, 'F Al F': 109.5, 'H C O': 108.9, 'H O P': 115.0, 'O S N': 103.0, 'S N C': 113.0, 'H C N': 113.5, 'C S Fe': 100.6, 'S Fe N': 90.0, 'Fe N C': 128.1, 'H C Fe': 180.0, 'N Fe C': 90.0, 'N Fe N': 90.0, 'O C Fe': 180.0, 'O Fe N': 90.0, 'O O Fe': 180.0, 'H C P': 110.0, 'S Zn S': 111.8, 'C S Zn': 95.0, 'C N Zn': 120.7, 'S Zn N': 108.1, 'N Zn N': 107.8, 'F C C': 118.8, 'H N P': 123.6, 'N C Se': 122.5, 'C O O': 104.0, 'O O H': 98.3, 'O Si O': 117.0, 'Si O Si': 150.5, 'H Si H': 119.0, 'H Si O': 118.0, 'Si O H': 122.5, 'Al O Al': 98.0, 'Al O Si': 117.0, 'H O Al': 93.4, 'O Al H': 93.4, 'O Al O': 90.0, 'O Si H': 118.0, 'O S C': 99.0
 }
+
+for key,angle in BOND_ANGLES.items():
+	BOND_ANGLES[key] = PI*angle/180.0
 
 COLOURS = {
 	'H':'Azure',
