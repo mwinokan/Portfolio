@@ -605,11 +605,17 @@ def main():
 	makers = [
 		make_H2O,
 		make_H2O,
+		make_C2H6O,
+		make_H2O,
+		make_H2O,
+		make_benzene,
+		make_H2O,
+		make_H2O,
 		make_C2H4,
 		make_H2O,
 		make_H2O,
 		make_benzene,
-	] * 2
+	]
 
 	make_molecule_grid(sim,makers,5,3,6)
 	
@@ -747,11 +753,29 @@ def make_C2H4(x,y,t=0):
 	mol.add_atom(Atom('C',rt=[COVALENT_RADII['C'],PI/2],q=-0.42))
 	mol.add_atom(Atom('C',rt=[COVALENT_RADII['C'],-PI/2],q=-0.42))
 
-	mol.add_atom(Atom('H',xy=[mol.atoms[0].x+bond_length('CH')*np.sin(BOND_ANGLES['C C H']/2),mol.atoms[0].y+bond_length('CH')*np.cos(BOND_ANGLES['C C H']/2)],q=0.21))
-	mol.add_atom(Atom('H',xy=[mol.atoms[0].x+bond_length('CH')*np.sin(-BOND_ANGLES['C C H']/2),mol.atoms[0].y+bond_length('CH')*np.cos(-BOND_ANGLES['C C H']/2)],q=0.21))
+	mol.add_atom(Atom('H',xy=[mol.atoms[1].x+bond_length('CH')*np.sin(BOND_ANGLES['C C H']),mol.atoms[1].y+bond_length('CH')*np.cos(BOND_ANGLES['C C H'])],q=0.21))
+	mol.add_atom(Atom('H',xy=[mol.atoms[1].x+bond_length('CH')*np.sin(-BOND_ANGLES['C C H']),mol.atoms[1].y+bond_length('CH')*np.cos(-BOND_ANGLES['C C H'])],q=0.21))
 
-	mol.add_atom(Atom('H',xy=[mol.atoms[1].x-bond_length('CH')*np.sin(BOND_ANGLES['C C H']/2),mol.atoms[1].y-bond_length('CH')*np.cos(BOND_ANGLES['C C H']/2)],q=0.21))
-	mol.add_atom(Atom('H',xy=[mol.atoms[1].x-bond_length('CH')*np.sin(-BOND_ANGLES['C C H']/2),mol.atoms[1].y-bond_length('CH')*np.cos(-BOND_ANGLES['C C H']/2)],q=0.21))
+	mol.add_atom(Atom('H',xy=[mol.atoms[0].x-bond_length('CH')*np.sin(BOND_ANGLES['C C H']),mol.atoms[0].y-bond_length('CH')*np.cos(BOND_ANGLES['C C H'])],q=0.21))
+	mol.add_atom(Atom('H',xy=[mol.atoms[0].x-bond_length('CH')*np.sin(-BOND_ANGLES['C C H']),mol.atoms[0].y-bond_length('CH')*np.cos(-BOND_ANGLES['C C H'])],q=0.21))
+	mol.center_atoms()
+	return mol
+
+def make_C2H6O(x,y,t=0):
+	mol = Molecule('ethanol',x,y,t)
+	mol.add_atom(Atom('C',rt=[bond_length('CC'),BOND_ANGLES['C C O']/2],q=None))
+	mol.add_atom(Atom('C',q=None))
+	mol.add_atom(Atom('O',rt=[bond_length('CO'),-BOND_ANGLES['C C O']/2],q=None))
+
+	mol.add_atom(Atom('H',xy=[mol.atoms[0].x+bond_length('CH')*np.sin(55/180*PI),mol.atoms[0].y+bond_length('CH')*np.cos(55/180*PI)],q=0.21))
+	mol.add_atom(Atom('H',xy=[mol.atoms[0].x+bond_length('CH')*np.sin(-55/180*PI),mol.atoms[0].y+bond_length('CH')*np.cos(-55/180*PI)],q=0.21))
+	mol.add_atom(Atom('H',xy=[mol.atoms[0].x,mol.atoms[0].y+bond_length('CH')],q=0.21))
+
+	mol.add_atom(Atom('H',xy=[mol.atoms[1].x-bond_length('CH')*np.cos(30/180*PI),mol.atoms[1].y-bond_length('CH')*np.sin(30/180*PI)],q=0.21))
+	mol.add_atom(Atom('H',xy=[mol.atoms[1].x-bond_length('CH')*np.cos(-30/180*PI),mol.atoms[1].y-bond_length('CH')*np.sin(-30/180*PI)],q=0.21))
+	
+	mol.add_atom(Atom('H',xy=[mol.atoms[2].x+bond_length('OH')*np.cos(-30/180*PI),mol.atoms[2].y+bond_length('OH')*np.sin(-30/180*PI)],q=0.21))
+
 	mol.center_atoms()
 	return mol
 
